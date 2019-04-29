@@ -23,7 +23,7 @@ import org.apache.kafka.streams.processor.StateStore;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Map;
+import java.util.Collection;
 
 interface StateManager extends Checkpointable {
     File baseDir();
@@ -37,7 +37,10 @@ interface StateManager extends Checkpointable {
 
     void flush();
 
-    void close(Map<TopicPartition, Long> offsets) throws IOException;
+    void reinitializeStateStoresForPartitions(final Collection<TopicPartition> partitions,
+                                              final InternalProcessorContext processorContext);
+
+    void close(final boolean clean) throws IOException;
 
     StateStore getGlobalStore(final String name);
 

@@ -18,9 +18,8 @@
 package kafka.coordinator.group
 
 import kafka.common.OffsetAndMetadata
-
 import org.apache.kafka.common.TopicPartition
-
+import org.apache.kafka.common.utils.Time
 import org.junit.Assert._
 import org.junit.{Before, Test}
 import org.scalatest.junit.JUnitSuite
@@ -31,6 +30,7 @@ import org.scalatest.junit.JUnitSuite
 class GroupMetadataTest extends JUnitSuite {
   private val protocolType = "consumer"
   private val groupId = "groupId"
+  private val groupInstanceId = Some("groupInstanceId")
   private val clientId = "clientId"
   private val clientHost = "clientHost"
   private val rebalanceTimeoutMs = 60000
@@ -40,7 +40,7 @@ class GroupMetadataTest extends JUnitSuite {
 
   @Before
   def setUp() {
-    group = new GroupMetadata("groupId")
+    group = new GroupMetadata("groupId", Empty, Time.SYSTEM)
   }
 
   @Test
@@ -192,14 +192,14 @@ class GroupMetadataTest extends JUnitSuite {
   @Test
   def testSelectProtocol() {
     val memberId = "memberId"
-    val member = new MemberMetadata(memberId, groupId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs,
+    val member = new MemberMetadata(memberId, groupId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs,
       protocolType, List(("range", Array.empty[Byte]), ("roundrobin", Array.empty[Byte])))
 
     group.add(member)
     assertEquals("range", group.selectProtocol)
 
     val otherMemberId = "otherMemberId"
-    val otherMember = new MemberMetadata(otherMemberId, groupId, clientId, clientHost, rebalanceTimeoutMs,
+    val otherMember = new MemberMetadata(otherMemberId, groupId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs,
       sessionTimeoutMs, protocolType, List(("roundrobin", Array.empty[Byte]), ("range", Array.empty[Byte])))
 
     group.add(otherMember)
@@ -207,7 +207,7 @@ class GroupMetadataTest extends JUnitSuite {
     assertTrue(Set("range", "roundrobin")(group.selectProtocol))
 
     val lastMemberId = "lastMemberId"
-    val lastMember = new MemberMetadata(lastMemberId, groupId, clientId, clientHost, rebalanceTimeoutMs,
+    val lastMember = new MemberMetadata(lastMemberId, groupId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs,
       sessionTimeoutMs, protocolType, List(("roundrobin", Array.empty[Byte]), ("range", Array.empty[Byte])))
 
     group.add(lastMember)
@@ -224,11 +224,11 @@ class GroupMetadataTest extends JUnitSuite {
   @Test
   def testSelectProtocolChoosesCompatibleProtocol() {
     val memberId = "memberId"
-    val member = new MemberMetadata(memberId, groupId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs,
+    val member = new MemberMetadata(memberId, groupId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs,
       protocolType, List(("range", Array.empty[Byte]), ("roundrobin", Array.empty[Byte])))
 
     val otherMemberId = "otherMemberId"
-    val otherMember = new MemberMetadata(otherMemberId, groupId, clientId, clientHost, rebalanceTimeoutMs,
+    val otherMember = new MemberMetadata(otherMemberId, groupId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs,
       sessionTimeoutMs, protocolType, List(("roundrobin", Array.empty[Byte]), ("blah", Array.empty[Byte])))
 
     group.add(member)
@@ -239,63 +239,64 @@ class GroupMetadataTest extends JUnitSuite {
   @Test
   def testSupportsProtocols() {
     // by default, the group supports everything
-    assertTrue(group.supportsProtocols(Set("roundrobin", "range")))
+    assertTrue(group.supportsProtocols(protocolType, Set("roundrobin", "range")))
 
     val memberId = "memberId"
-    val member = new MemberMetadata(memberId, groupId, clientId, clientHost, rebalanceTimeoutMs,
+    val member = new MemberMetadata(memberId, groupId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs,
       sessionTimeoutMs, protocolType, List(("range", Array.empty[Byte]), ("roundrobin", Array.empty[Byte])))
 
     group.add(member)
-    assertTrue(group.supportsProtocols(Set("roundrobin", "foo")))
-    assertTrue(group.supportsProtocols(Set("range", "foo")))
-    assertFalse(group.supportsProtocols(Set("foo", "bar")))
+    group.transitionTo(PreparingRebalance)
+    assertTrue(group.supportsProtocols(protocolType, Set("roundrobin", "foo")))
+    assertTrue(group.supportsProtocols(protocolType, Set("range", "foo")))
+    assertFalse(group.supportsProtocols(protocolType, Set("foo", "bar")))
 
     val otherMemberId = "otherMemberId"
-    val otherMember = new MemberMetadata(otherMemberId, groupId, clientId, clientHost, rebalanceTimeoutMs,
+    val otherMember = new MemberMetadata(otherMemberId, groupId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs,
       sessionTimeoutMs, protocolType, List(("roundrobin", Array.empty[Byte]), ("blah", Array.empty[Byte])))
 
     group.add(otherMember)
 
-    assertTrue(group.supportsProtocols(Set("roundrobin", "foo")))
-    assertFalse(group.supportsProtocols(Set("range", "foo")))
+    assertTrue(group.supportsProtocols(protocolType, Set("roundrobin", "foo")))
+    assertFalse(group.supportsProtocols("invalid_type", Set("roundrobin", "foo")))
+    assertFalse(group.supportsProtocols(protocolType, Set("range", "foo")))
   }
 
   @Test
   def testInitNextGeneration() {
     val memberId = "memberId"
-    val member = new MemberMetadata(memberId, groupId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs,
+    val member = new MemberMetadata(memberId, groupId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs,
       protocolType, List(("roundrobin", Array.empty[Byte])))
 
     group.transitionTo(PreparingRebalance)
-    member.awaitingJoinCallback = _ => ()
-    group.add(member)
+    group.add(member, _ => ())
 
     assertEquals(0, group.generationId)
-    assertNull(group.protocol)
+    assertNull(group.protocolOrNull)
 
     group.initNextGeneration()
 
     assertEquals(1, group.generationId)
-    assertEquals("roundrobin", group.protocol)
+    assertEquals("roundrobin", group.protocolOrNull)
   }
 
   @Test
   def testInitNextGenerationEmptyGroup() {
     assertEquals(Empty, group.currentState)
     assertEquals(0, group.generationId)
-    assertNull(group.protocol)
+    assertNull(group.protocolOrNull)
 
     group.transitionTo(PreparingRebalance)
     group.initNextGeneration()
 
     assertEquals(1, group.generationId)
-    assertNull(group.protocol)
+    assertNull(group.protocolOrNull)
   }
 
   @Test
   def testOffsetCommit(): Unit = {
     val partition = new TopicPartition("foo", 0)
-    val offset = OffsetAndMetadata(37)
+    val offset = offsetAndMetadata(37)
     val commitRecordOffset = 3
 
     group.prepareOffsetCommit(Map(partition -> offset))
@@ -310,7 +311,7 @@ class GroupMetadataTest extends JUnitSuite {
   @Test
   def testOffsetCommitFailure(): Unit = {
     val partition = new TopicPartition("foo", 0)
-    val offset = OffsetAndMetadata(37)
+    val offset = offsetAndMetadata(37)
 
     group.prepareOffsetCommit(Map(partition -> offset))
     assertTrue(group.hasOffsets)
@@ -324,8 +325,8 @@ class GroupMetadataTest extends JUnitSuite {
   @Test
   def testOffsetCommitFailureWithAnotherPending(): Unit = {
     val partition = new TopicPartition("foo", 0)
-    val firstOffset = OffsetAndMetadata(37)
-    val secondOffset = OffsetAndMetadata(57)
+    val firstOffset = offsetAndMetadata(37)
+    val secondOffset = offsetAndMetadata(57)
 
     group.prepareOffsetCommit(Map(partition -> firstOffset))
     assertTrue(group.hasOffsets)
@@ -346,8 +347,8 @@ class GroupMetadataTest extends JUnitSuite {
   @Test
   def testOffsetCommitWithAnotherPending(): Unit = {
     val partition = new TopicPartition("foo", 0)
-    val firstOffset = OffsetAndMetadata(37)
-    val secondOffset = OffsetAndMetadata(57)
+    val firstOffset = offsetAndMetadata(37)
+    val secondOffset = offsetAndMetadata(57)
 
     group.prepareOffsetCommit(Map(partition -> firstOffset))
     assertTrue(group.hasOffsets)
@@ -369,8 +370,8 @@ class GroupMetadataTest extends JUnitSuite {
   def testConsumerBeatsTransactionalOffsetCommit(): Unit = {
     val partition = new TopicPartition("foo", 0)
     val producerId = 13232L
-    val txnOffsetCommit = OffsetAndMetadata(37)
-    val consumerOffsetCommit = OffsetAndMetadata(57)
+    val txnOffsetCommit = offsetAndMetadata(37)
+    val consumerOffsetCommit = offsetAndMetadata(57)
 
     group.prepareTxnOffsetCommit(producerId, Map(partition -> txnOffsetCommit))
     assertTrue(group.hasOffsets)
@@ -394,8 +395,8 @@ class GroupMetadataTest extends JUnitSuite {
   def testTransactionBeatsConsumerOffsetCommit(): Unit = {
     val partition = new TopicPartition("foo", 0)
     val producerId = 13232L
-    val txnOffsetCommit = OffsetAndMetadata(37)
-    val consumerOffsetCommit = OffsetAndMetadata(57)
+    val txnOffsetCommit = offsetAndMetadata(37)
+    val consumerOffsetCommit = offsetAndMetadata(57)
 
     group.prepareTxnOffsetCommit(producerId, Map(partition -> txnOffsetCommit))
     assertTrue(group.hasOffsets)
@@ -421,8 +422,8 @@ class GroupMetadataTest extends JUnitSuite {
   def testTransactionalCommitIsAbortedAndConsumerCommitWins(): Unit = {
     val partition = new TopicPartition("foo", 0)
     val producerId = 13232L
-    val txnOffsetCommit = OffsetAndMetadata(37)
-    val consumerOffsetCommit = OffsetAndMetadata(57)
+    val txnOffsetCommit = offsetAndMetadata(37)
+    val consumerOffsetCommit = offsetAndMetadata(57)
 
     group.prepareTxnOffsetCommit(producerId, Map(partition -> txnOffsetCommit))
     assertTrue(group.hasOffsets)
@@ -449,7 +450,7 @@ class GroupMetadataTest extends JUnitSuite {
   def testFailedTxnOffsetCommitLeavesNoPendingState(): Unit = {
     val partition = new TopicPartition("foo", 0)
     val producerId = 13232L
-    val txnOffsetCommit = OffsetAndMetadata(37)
+    val txnOffsetCommit = offsetAndMetadata(37)
 
     group.prepareTxnOffsetCommit(producerId, Map(partition -> txnOffsetCommit))
     assertTrue(group.hasPendingOffsetCommitsFromProducer(producerId))
@@ -473,4 +474,9 @@ class GroupMetadataTest extends JUnitSuite {
     }
     assertTrue(group.is(targetState))
   }
+
+  private def offsetAndMetadata(offset: Long): OffsetAndMetadata = {
+    OffsetAndMetadata(offset, "", Time.SYSTEM.milliseconds())
+  }
+
 }

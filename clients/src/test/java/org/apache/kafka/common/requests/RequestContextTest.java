@@ -41,6 +41,7 @@ public class RequestContextTest {
         RequestHeader header = new RequestHeader(ApiKeys.API_VERSIONS, Short.MAX_VALUE, "", correlationId);
         RequestContext context = new RequestContext(header, "0", InetAddress.getLocalHost(), KafkaPrincipal.ANONYMOUS,
                 new ListenerName("ssl"), SecurityProtocol.SASL_SSL);
+        assertEquals(0, context.apiVersion());
 
         // Write some garbage to the request buffer. This should be ignored since we will treat
         // the unknown version type as v0 which has an empty request body.
@@ -67,7 +68,8 @@ public class RequestContextTest {
         assertEquals(correlationId, responseHeader.correlationId());
 
         Struct struct = ApiKeys.API_VERSIONS.parseResponse((short) 0, responseBuffer);
-        ApiVersionsResponse response = (ApiVersionsResponse) AbstractResponse.parseResponse(ApiKeys.API_VERSIONS, struct);
+        ApiVersionsResponse response = (ApiVersionsResponse)
+            AbstractResponse.parseResponse(ApiKeys.API_VERSIONS, struct, (short) 0);
         assertEquals(Errors.UNSUPPORTED_VERSION, response.error());
         assertTrue(response.apiVersions().isEmpty());
     }

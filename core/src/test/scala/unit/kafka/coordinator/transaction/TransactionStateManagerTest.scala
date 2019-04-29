@@ -17,16 +17,17 @@
 package kafka.coordinator.transaction
 
 import java.nio.ByteBuffer
+import java.util.concurrent.locks.ReentrantLock
 
 import kafka.log.Log
 import kafka.server.{FetchDataInfo, LogOffsetMetadata, ReplicaManager}
-import kafka.utils.{MockScheduler, Pool, ZkUtils}
+import kafka.utils.{MockScheduler, Pool}
 import kafka.utils.TestUtils.fail
+import kafka.zk.KafkaZkClient
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.internals.Topic.TRANSACTION_STATE_TOPIC_NAME
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.record._
-import org.apache.kafka.common.requests.IsolationLevel
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
 import org.apache.kafka.common.requests.TransactionResult
 import org.apache.kafka.common.utils.MockTime
@@ -50,17 +51,17 @@ class TransactionStateManagerTest {
 
   val time = new MockTime()
   val scheduler = new MockScheduler(time)
-  val zkUtils: ZkUtils = EasyMock.createNiceMock(classOf[ZkUtils])
+  val zkClient: KafkaZkClient = EasyMock.createNiceMock(classOf[KafkaZkClient])
   val replicaManager: ReplicaManager = EasyMock.createNiceMock(classOf[ReplicaManager])
 
-  EasyMock.expect(zkUtils.getTopicPartitionCount(TRANSACTION_STATE_TOPIC_NAME))
+  EasyMock.expect(zkClient.getTopicPartitionCount(TRANSACTION_STATE_TOPIC_NAME))
     .andReturn(Some(numPartitions))
     .anyTimes()
 
-  EasyMock.replay(zkUtils)
+  EasyMock.replay(zkClient)
 
   val txnConfig = TransactionConfig()
-  val transactionManager: TransactionStateManager = new TransactionStateManager(0, zkUtils, scheduler, replicaManager, txnConfig, time)
+  val transactionManager: TransactionStateManager = new TransactionStateManager(0, zkClient, scheduler, replicaManager, txnConfig, time)
 
   val transactionalId1: String = "one"
   val transactionalId2: String = "two"
@@ -81,7 +82,7 @@ class TransactionStateManagerTest {
 
   @After
   def tearDown() {
-    EasyMock.reset(zkUtils, replicaManager)
+    EasyMock.reset(zkClient, replicaManager)
     transactionManager.shutdown()
   }
 
@@ -417,56 +418,57 @@ class TransactionStateManagerTest {
   def shouldRemoveCompleteCommmitExpiredTransactionalIds(): Unit = {
     setupAndRunTransactionalIdExpiration(Errors.NONE, CompleteCommit)
     verifyMetadataDoesntExist(transactionalId1)
-    verifyMetadataDoesExist(transactionalId2)
+    verifyMetadataDoesExistAndIsUsable(transactionalId2)
   }
 
   @Test
   def shouldRemoveCompleteAbortExpiredTransactionalIds(): Unit = {
     setupAndRunTransactionalIdExpiration(Errors.NONE, CompleteAbort)
     verifyMetadataDoesntExist(transactionalId1)
-    verifyMetadataDoesExist(transactionalId2)
+    verifyMetadataDoesExistAndIsUsable(transactionalId2)
   }
 
   @Test
   def shouldRemoveEmptyExpiredTransactionalIds(): Unit = {
     setupAndRunTransactionalIdExpiration(Errors.NONE, Empty)
     verifyMetadataDoesntExist(transactionalId1)
-    verifyMetadataDoesExist(transactionalId2)
+    verifyMetadataDoesExistAndIsUsable(transactionalId2)
   }
 
   @Test
   def shouldNotRemoveExpiredTransactionalIdsIfLogAppendFails(): Unit = {
     setupAndRunTransactionalIdExpiration(Errors.NOT_ENOUGH_REPLICAS, CompleteAbort)
-    verifyMetadataDoesExist(transactionalId1)
-    verifyMetadataDoesExist(transactionalId2)
+    verifyMetadataDoesExistAndIsUsable(transactionalId1)
+    verifyMetadataDoesExistAndIsUsable(transactionalId2)
   }
 
   @Test
   def shouldNotRemoveOngoingTransactionalIds(): Unit = {
     setupAndRunTransactionalIdExpiration(Errors.NONE, Ongoing)
-    verifyMetadataDoesExist(transactionalId1)
-    verifyMetadataDoesExist(transactionalId2)
+    verifyMetadataDoesExistAndIsUsable(transactionalId1)
+    verifyMetadataDoesExistAndIsUsable(transactionalId2)
   }
 
   @Test
   def shouldNotRemovePrepareAbortTransactionalIds(): Unit = {
     setupAndRunTransactionalIdExpiration(Errors.NONE, PrepareAbort)
-    verifyMetadataDoesExist(transactionalId1)
-    verifyMetadataDoesExist(transactionalId2)
+    verifyMetadataDoesExistAndIsUsable(transactionalId1)
+    verifyMetadataDoesExistAndIsUsable(transactionalId2)
   }
 
   @Test
   def shouldNotRemovePrepareCommitTransactionalIds(): Unit = {
     setupAndRunTransactionalIdExpiration(Errors.NONE, PrepareCommit)
-    verifyMetadataDoesExist(transactionalId1)
-    verifyMetadataDoesExist(transactionalId2)
+    verifyMetadataDoesExistAndIsUsable(transactionalId1)
+    verifyMetadataDoesExistAndIsUsable(transactionalId2)
   }
 
-  private def verifyMetadataDoesExist(transactionalId: String) = {
+  private def verifyMetadataDoesExistAndIsUsable(transactionalId: String) = {
     transactionManager.getTransactionState(transactionalId) match {
       case Left(errors) => fail("shouldn't have been any errors")
       case Right(None) => fail("metadata should have been removed")
-      case Right(Some(metadata)) => // ok
+      case Right(Some(metadata)) =>
+        assertTrue("metadata shouldn't be in a pending state", metadata.transactionMetadata.pendingState.isEmpty)
     }
   }
 
@@ -498,6 +500,7 @@ class TransactionStateManagerTest {
           EasyMock.eq(false),
           EasyMock.eq(recordsByPartition),
           EasyMock.capture(capturedArgument),
+          EasyMock.anyObject().asInstanceOf[Option[ReentrantLock]],
           EasyMock.anyObject()
         )).andAnswer(new IAnswer[Unit] {
           override def answer(): Unit = {
@@ -570,8 +573,8 @@ class TransactionStateManagerTest {
                             records: MemoryRecords): Unit = {
     EasyMock.reset(replicaManager)
 
-    val logMock =  EasyMock.mock(classOf[Log])
-    val fileRecordsMock = EasyMock.mock(classOf[FileRecords])
+    val logMock: Log = EasyMock.mock(classOf[Log])
+    val fileRecordsMock: FileRecords = EasyMock.mock(classOf[FileRecords])
 
     val endOffset = startOffset + records.records.asScala.size
 
@@ -579,12 +582,24 @@ class TransactionStateManagerTest {
     EasyMock.expect(replicaManager.getLogEndOffset(topicPartition)).andStubReturn(Some(endOffset))
 
     EasyMock.expect(logMock.logStartOffset).andStubReturn(startOffset)
-    EasyMock.expect(logMock.read(EasyMock.eq(startOffset), EasyMock.anyInt(), EasyMock.eq(None),
-      EasyMock.eq(true), EasyMock.eq(IsolationLevel.READ_UNCOMMITTED)))
+    EasyMock.expect(logMock.read(EasyMock.eq(startOffset),
+      maxLength = EasyMock.anyInt(),
+      maxOffset = EasyMock.eq(None),
+      minOneMessage = EasyMock.eq(true),
+      includeAbortedTxns = EasyMock.eq(false)))
       .andReturn(FetchDataInfo(LogOffsetMetadata(startOffset), fileRecordsMock))
-    EasyMock.expect(fileRecordsMock.readInto(EasyMock.anyObject(classOf[ByteBuffer]), EasyMock.anyInt()))
-      .andReturn(records.buffer)
 
+    EasyMock.expect(fileRecordsMock.sizeInBytes()).andStubReturn(records.sizeInBytes)
+
+    val bufferCapture = EasyMock.newCapture[ByteBuffer]
+    fileRecordsMock.readInto(EasyMock.capture(bufferCapture), EasyMock.anyInt())
+    EasyMock.expectLastCall().andAnswer(new IAnswer[Unit] {
+      override def answer: Unit = {
+        val buffer = bufferCapture.getValue
+        buffer.put(records.buffer.duplicate)
+        buffer.flip()
+      }
+    })
     EasyMock.replay(logMock, fileRecordsMock, replicaManager)
   }
 
@@ -598,6 +613,7 @@ class TransactionStateManagerTest {
       isFromClient = EasyMock.eq(false),
       EasyMock.anyObject().asInstanceOf[Map[TopicPartition, MemoryRecords]],
       EasyMock.capture(capturedArgument),
+      EasyMock.anyObject().asInstanceOf[Option[ReentrantLock]],
       EasyMock.anyObject())
     ).andAnswer(new IAnswer[Unit] {
         override def answer(): Unit = capturedArgument.getValue.apply(

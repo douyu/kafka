@@ -62,14 +62,14 @@ class DelayedDeleteRecords(delayMs: Long,
   /**
    * The delayed delete records operation can be completed if every partition specified in the request satisfied one of the following:
    *
-   * 1) There was an error while checking if all replicas have caught up to to the deleteRecordsOffset: set an error in response
+   * 1) There was an error while checking if all replicas have caught up to the deleteRecordsOffset: set an error in response
    * 2) The low watermark of the partition has caught up to the deleteRecordsOffset. set the low watermark in response
    *
    */
   override def tryComplete(): Boolean = {
     // check for each partition if it still has pending acks
     deleteRecordsStatus.foreach { case (topicPartition, status) =>
-      trace(s"Checking delete records satisfaction for ${topicPartition}, current status $status")
+      trace(s"Checking delete records satisfaction for $topicPartition, current status $status")
       // skip those partitions that have already been satisfied
       if (status.acksPending) {
         val (lowWatermarkReached, error, lw) = replicaManager.getPartition(topicPartition) match {

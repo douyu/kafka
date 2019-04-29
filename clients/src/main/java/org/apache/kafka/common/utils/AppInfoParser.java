@@ -41,7 +41,7 @@ public class AppInfoParser {
         try (InputStream resourceStream = AppInfoParser.class.getResourceAsStream("/kafka/kafka-version.properties")) {
             props.load(resourceStream);
         } catch (Exception e) {
-            log.warn("Error while loading kafka-version.properties :" + e.getMessage());
+            log.warn("Error while loading kafka-version.properties: {}", e.getMessage());
         }
         VERSION = props.getProperty("version", "unknown").trim();
         COMMIT_ID = props.getProperty("commitId", "unknown").trim();
@@ -57,7 +57,7 @@ public class AppInfoParser {
 
     public static synchronized void registerAppInfo(String prefix, String id, Metrics metrics) {
         try {
-            ObjectName name = new ObjectName(prefix + ":type=app-info,id=" + Sanitizer.sanitize(id));
+            ObjectName name = new ObjectName(prefix + ":type=app-info,id=" + Sanitizer.jmxSanitize(id));
             AppInfo mBean = new AppInfo();
             ManagementFactory.getPlatformMBeanServer().registerMBean(mBean, name);
 
@@ -70,7 +70,7 @@ public class AppInfoParser {
     public static synchronized void unregisterAppInfo(String prefix, String id, Metrics metrics) {
         MBeanServer server = ManagementFactory.getPlatformMBeanServer();
         try {
-            ObjectName name = new ObjectName(prefix + ":type=app-info,id=" + Sanitizer.sanitize(id));
+            ObjectName name = new ObjectName(prefix + ":type=app-info,id=" + Sanitizer.jmxSanitize(id));
             if (server.isRegistered(name))
                 server.unregisterMBean(name);
 
@@ -99,15 +99,15 @@ public class AppInfoParser {
     }
 
     public interface AppInfoMBean {
-        public String getVersion();
-        public String getCommitId();
+        String getVersion();
+        String getCommitId();
     }
 
     public static class AppInfo implements AppInfoMBean {
 
         public AppInfo() {
-            log.info("Kafka version : " + AppInfoParser.getVersion());
-            log.info("Kafka commitId : " + AppInfoParser.getCommitId());
+            log.info("Kafka version: {}", AppInfoParser.getVersion());
+            log.info("Kafka commitId: {}", AppInfoParser.getCommitId());
         }
 
         @Override
